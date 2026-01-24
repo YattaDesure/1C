@@ -1,0 +1,426 @@
+# ============================================
+# DEMO PACK (ONE FILE) — Git + PlantUML + PostgreSQL + Python
+# Скопируй всё целиком в один файл, например: demo_pack.txt
+# Внутри есть:
+# 1) Git команды
+# 2) PlantUML шаблоны
+# 3) PostgreSQL скрипт (demo.sql)
+# 4) Python файл (demo_pg.py)
+# ============================================
+
+# ----------------------------
+# 1) GIT (шпаргалка)
+# ----------------------------
+# init + commit
+git init
+git status
+git add .
+git commit -m "init"
+
+# ветки
+git checkout -b feature/db
+git checkout main
+git merge feature/db
+
+# история
+git log --oneline --graph --decorate --all
+
+# откат
+git restore <file>
+git restore --staged <file>
+git reset --hard HEAD~1      # осторожно
+git revert <commit_hash>
+
+# remote
+git remote add origin <URL>
+git push -u origin main
+git pull
+
+# теги
+git tag v1.0
+git push origin v1.0
+
+
+# ----------------------------
+# 2) PLANTUML (копируй в .puml)
+# ----------------------------
+
+# 2.1 Use Case
+@startuml
+left to right direction
+actor "Пользователь" as U
+rectangle "Система" {
+  usecase "Добавить задачу" as UC1
+  usecase "Редактировать задачу" as UC2
+  usecase "Удалить задачу" as UC3
+  usecase "Просмотреть список" as UC4
+}
+U --> UC1
+U --> UC2
+U --> UC3
+U --> UC4
+@enduml
+
+# 2.2 ER (сущности БД)
+@startuml
+entity users {
+  * id : bigint <<PK>>
+  --
+  email : text
+  full_name : text
+  created_at : timestamptz
+}
+
+entity projects {
+  * id : bigint <<PK>>
+  --
+  name : text
+  owner_id : bigint <<FK>>
+  created_at : timestamptz
+}
+
+entity tasks {
+  * id : bigint <<PK>>
+  --
+  project_id : bigint <<FK>>
+  title : text
+  status : text
+  due_date : date
+  created_at : timestamptz
+  updated_at : timestamptz
+}
+
+users ||--o{ projects : owns
+projects ||--o{ tasks : contains
+@enduml
+
+# 2.3 Sequence (CRUD)
+@startuml
+actor User
+participant "Python App" as App
+database "PostgreSQL" as DB
+
+User -> App: create_task()
+App -> DB: INSERT INTO tasks...
+DB --> App: task_id
+App --> User: ok(task_id)
+
+User -> App: update_task()
+App -> DB: UPDATE tasks SET...
+DB --> App: rows=1
+App --> User: ok
+
+User -> App: delete_task()
+App -> DB: DELETE FROM tasks...
+DB --> App: rows=1
+App --> User: ok
+@enduml
+
+
+# ----------------------------
+# 3) PostgreSQL script: demo.sql
+# (СОХРАНИ ЭТУ ЧАСТЬ В demo.sql)
+# запуск: psql -h localhost -U postgres -d demo -f demo.sql
+# ----------------------------
+-- demo.sql
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS demo;
+SET search_path TO demo;
+
+CREATE TABLE IF NOT EXISTS users (
+  id          BIGSERIAL PRIMARY KEY,
+  email       TEXT NOT NULL UNIQUE,
+  full_name   TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id          BIGSERIAL PRIMARY KEY,
+  name        TEXT NOT NULL,
+  owner_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id          BIGSERIAL PRIMARY KEY,
+  project_id  BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','done')),
+  due_date    DATE NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_project  ON tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_tasks_updated_at ON tasks;
+CREATE TRIGGER trg_tasks_updated_at
+BEFORE UPDATE ON tasks
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+CREATE OR REPLACE VIEW v_tasks AS
+SELECT
+  t.id,
+  t.title,
+  t.status,
+  t.due_date,
+  t.created_at,
+  t.updated_at,
+  p.name AS project_name,
+  u.full_name AS owner_name,
+  u.email AS owner_email
+FROM tasks t
+JOIN projects p ON p.id = t.project_id
+JOIN users u ON u.id = p.owner_id;
+
+CREATE OR REPLACE FUNCTION create_task(p_project_id BIGINT, p_title TEXT, p_due DATE DEFAULT NULL)
+RETURNS BIGINT AS $$
+DECLARE new_id BIGINT;
+BEGIN
+  INSERT INTO tasks(project_id, title, due_date)
+  VALUES (p_project_id, p_title, p_due)
+  RETURNING id INTO new_id;
+
+  RETURN new_id;
+END;
+$$ LANGUAGE plpgsql;
+
+INSERT INTO users(email, full_name)
+VALUES
+  ('ivan@example.com', 'Иван Петров'),
+  ('olga@example.com', 'Ольга Смирнова')
+ON CONFLICT (email) DO UPDATE
+SET full_name = EXCLUDED.full_name;
+
+INSERT INTO projects(name, owner_id)
+SELECT 'Demo Project', id FROM users WHERE email='ivan@example.com'
+ON CONFLICT DO NOTHING;
+
+DO $$
+DECLARE pid BIGINT;
+BEGIN
+  SELECT id INTO pid FROM projects WHERE name='Demo Project' LIMIT 1;
+
+  IF pid IS NOT NULL THEN
+    PERFORM create_task(pid, 'Поднять БД и прогнать миграции', CURRENT_DATE + 1);
+    PERFORM create_task(pid, 'Сделать CRUD в Python', CURRENT_DATE + 2);
+    PERFORM create_task(pid, 'Нарисовать PlantUML диаграммы', CURRENT_DATE + 3);
+  END IF;
+END $$;
+
+COMMIT;
+
+-- Примеры:
+-- SELECT * FROM demo.v_tasks ORDER BY id;
+-- UPDATE demo.tasks SET status='doing' WHERE id=1;
+-- DELETE FROM demo.tasks WHERE id=2;
+-- SELECT status, count(*) FROM demo.tasks GROUP BY status ORDER BY status;
+
+
+# ----------------------------
+# 4) Python: demo_pg.py
+# (СОХРАНИ ЭТУ ЧАСТЬ В demo_pg.py)
+# pip install psycopg2-binary
+# env для подключения:
+#   PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
+# ----------------------------
+# demo_pg.py
+
+import os
+import sys
+from dataclasses import dataclass
+from typing import Optional, List
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+
+@dataclass
+class DbConfig:
+    host: str = os.getenv("PGHOST", "localhost")
+    port: int = int(os.getenv("PGPORT", "5432"))
+    dbname: str = os.getenv("PGDATABASE", "demo")
+    user: str = os.getenv("PGUSER", "postgres")
+    password: str = os.getenv("PGPASSWORD", "postgres")
+
+
+def get_conn(cfg: DbConfig):
+    return psycopg2.connect(
+        host=cfg.host,
+        port=cfg.port,
+        dbname=cfg.dbname,
+        user=cfg.user,
+        password=cfg.password,
+    )
+
+
+def run_sql_file(conn, path: str) -> None:
+    with open(path, "r", encoding="utf-8") as f:
+        sql = f.read()
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+
+
+def create_task(conn, project_id: int, title: str, due_date: Optional[str] = None) -> int:
+    sql = """
+    INSERT INTO demo.tasks(project_id, title, due_date)
+    VALUES (%s, %s, %s)
+    RETURNING id;
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (project_id, title, due_date))
+        new_id = cur.fetchone()[0]
+    conn.commit()
+    return new_id
+
+
+def list_tasks(conn, limit: int = 50) -> List[dict]:
+    sql = """
+    SELECT * FROM demo.v_tasks
+    ORDER BY id
+    LIMIT %s;
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (limit,))
+        return cur.fetchall()
+
+
+def update_task_status(conn, task_id: int, status: str) -> int:
+    sql = "UPDATE demo.tasks SET status = %s WHERE id = %s;"
+    with conn.cursor() as cur:
+        cur.execute(sql, (status, task_id))
+        affected = cur.rowcount
+    conn.commit()
+    return affected
+
+
+def delete_task(conn, task_id: int) -> int:
+    sql = "DELETE FROM demo.tasks WHERE id = %s;"
+    with conn.cursor() as cur:
+        cur.execute(sql, (task_id,))
+        affected = cur.rowcount
+    conn.commit()
+    return affected
+
+
+def get_demo_project_id(conn) -> Optional[int]:
+    sql = "SELECT id FROM demo.projects WHERE name=%s LIMIT 1;"
+    with conn.cursor() as cur:
+        cur.execute(sql, ("Demo Project",))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def print_rows(rows: List[dict]) -> None:
+    if not rows:
+        print("Нет данных.")
+        return
+    for r in rows:
+        print(
+            f"[{r['id']}] {r['title']} | status={r['status']} | project={r['project_name']} | owner={r['owner_name']} | due={r['due_date']}"
+        )
+
+
+def main():
+    """
+    Команды:
+      python demo_pg.py init demo.sql
+      python demo_pg.py list
+      python demo_pg.py add "Новая задача" 2026-01-30
+      python demo_pg.py status 1 done
+      python demo_pg.py del 1
+    """
+    if len(sys.argv) < 2:
+        print(main.__doc__)
+        sys.exit(1)
+
+    cmd = sys.argv[1].lower()
+    cfg = DbConfig()
+
+    try:
+        with get_conn(cfg) as conn:
+            if cmd == "init":
+                if len(sys.argv) < 3:
+                    print("Укажи путь к sql: python demo_pg.py init demo.sql")
+                    sys.exit(1)
+                run_sql_file(conn, sys.argv[2])
+                print("SQL выполнен. Схема demo готова.")
+                return
+
+            if cmd == "list":
+                print_rows(list_tasks(conn))
+                return
+
+            if cmd == "add":
+                if len(sys.argv) < 3:
+                    print('Пример: python demo_pg.py add "Новая задача" 2026-01-30')
+                    sys.exit(1)
+                title = sys.argv[2]
+                due = sys.argv[3] if len(sys.argv) >= 4 else None
+
+                pid = get_demo_project_id(conn)
+                if pid is None:
+                    print("Не найден проект 'Demo Project'. Сначала выполни: python demo_pg.py init demo.sql")
+                    sys.exit(2)
+
+                new_id = create_task(conn, pid, title, due)
+                print(f"Создана задача id={new_id}")
+                return
+
+            if cmd == "status":
+                if len(sys.argv) < 4:
+                    print("Пример: python demo_pg.py status 1 done")
+                    sys.exit(1)
+                task_id = int(sys.argv[2])
+                status = sys.argv[3]
+                affected = update_task_status(conn, task_id, status)
+                print(f"Обновлено строк: {affected}")
+                return
+
+            if cmd == "del":
+                if len(sys.argv) < 3:
+                    print("Пример: python demo_pg.py del 1")
+                    sys.exit(1)
+                task_id = int(sys.argv[2])
+                affected = delete_task(conn, task_id)
+                print(f"Удалено строк: {affected}")
+                return
+
+            print("Неизвестная команда.")
+            print(main.__doc__)
+            sys.exit(1)
+
+    except psycopg2.Error as e:
+        print("Ошибка PostgreSQL:", e)
+        sys.exit(3)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# --------------------------------
+# Быстрый прогон (если нужно):
+# --------------------------------
+# createdb -U postgres demo
+# psql -U postgres -d demo -f demo.sql
+# pip install psycopg2-binary
+# python demo_pg.py init demo.sql
+# python demo_pg.py list
+# python demo_pg.py add "Проверка" 2026-01-30
+# python demo_pg.py status 1 done
+# python demo_pg.py del 1
